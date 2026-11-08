@@ -57,6 +57,11 @@ struct ImageInfo {
     s32 MipOf(const ImageInfo& info) const;
     s32 SliceOf(const ImageInfo& info, s32 mip) const;
 
+    /// FIX-GT7-126: the level of this block-compressed image that `target` holds as one texel per
+    /// block (a compute shader writing the compressed blocks through an uncompressed image over
+    /// the level's padded area, at the level's address), or -1.
+    s32 BlockLevelOf(const ImageInfo& target) const;
+
     bool IsCompatible(const ImageInfo& info) const;
 
     /// Whether this single-level color image is an origin-aligned crop of the same layout.

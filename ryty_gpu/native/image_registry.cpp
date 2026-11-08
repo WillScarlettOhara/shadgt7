@@ -654,6 +654,38 @@ ImageEntry* ImageRegistry::FindExisting(VAddr address,
 }
 
 SourcePlace PlaceOf(const VideoCore::ImageInfo& target, const VideoCore::ImageInfo& texture) {
+    // FIX-GT7-126: a level of a block-compressed texture written by the GPU as one uncompressed
+    // texel per block. GT7's Scapes compress their HDR photo (6024x4016) to BC6H in a compute
+    // shader that binds each level as an R32G32B32A32Uint storage image over the level's padded
+    // area (2048x1024 for level 0, at the texture's address; 1024x512 for level 1, at its offset),
+    // and the scene samples the BC6H texture. Without a place the texture read guest memory,
+    // which only the GPU had written: zeros, a black background in the editor and in every photo.
+    // The copy then counts in source texels, one per block (Vulkan's rule between compressed and
+    // uncompressed formats). RYGT_NATIVE_BLOCK_TARGETS=0: as before.
+    if (texture.props.is_block && !target.props.is_block) {
+        static const bool block_targets = [] {
+            const char* env = std::getenv("RYGT_NATIVE_BLOCK_TARGETS");
+            return !(env && env[0] == '0');
+        }();
+        const s32 mip = block_targets ? texture.BlockLevelOf(target) : -1;
+        if (mip < 0) {
+            return {};
+        }
+        SourcePlace place{mip, 0, (std::max(texture.size.width >> mip, 1u) + 3) / 4,
+                          (std::max(texture.size.height >> mip, 1u) + 3) / 4};
+        place.blocks = true;
+        static std::atomic<u32> logged{};
+        if (logged++ < 16) {
+            LOG_INFO(Render_Vulkan,
+                     "FIX-GT7-126: texture {:#x} {}x{} {} level {} made of target {:#x} {}x{} {} "
+                     "({}x{} blocks)",
+                     texture.guest_address, texture.size.width, texture.size.height,
+                     vk::to_string(texture.pixel_format), mip, target.guest_address,
+                     target.size.width, target.size.height, vk::to_string(target.pixel_format),
+                     place.width, place.height);
+        }
+        return place;
+    }
     if (target.props.is_depth || texture.props.is_depth || target.props.is_block ||
         texture.props.is_block || target.num_bits != texture.num_bits ||
         target.props.is_bgr_packed_float != texture.props.is_bgr_packed_float ||

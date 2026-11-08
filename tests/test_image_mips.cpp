@@ -136,3 +136,83 @@ TEST(ImageMips, FullChainExtendsAnImageCachedUnderAnotherFormat) {
         Color2D(EnvMap, 2048, 1024, 1, Micro, vk::Format::eR8G8B8A8Unorm, 32);
     EXPECT_FALSE(texture.ExtendsAcrossFormat(cached_linear));
 }
+
+// FIX-GT7-126: GT7's Scapes compress their HDR photo to BC6H on the GPU. The values come from a
+// Scapes session (run-20261108-083523, NAT-041 and DIAG-197 lines, frame dump T#s): the scene
+// samples a 6024x4016 BC6H texture at 0x1036e00000 (5 levels, pitch 8192, tile index 13, 0x2aa0000
+// bytes), and the encoder wrote its levels through R32G32B32A32Uint storage images: 2048x1024 at
+// the texture's address, 1024x512 at 0x1038e00000.
+namespace {
+constexpr VAddr ScapesPhoto = 0x1036e00000;
+
+ImageInfo BlockTexture(VAddr address, u32 width, u32 height, u32 pitch, u32 levels, u32 bits,
+                       vk::Format format, bool pow2) {
+    ImageInfo info{};
+    info.guest_address = address;
+    info.type = AmdGpu::ImageType::Color2D;
+    info.resources = {static_cast<u16>(levels), 1};
+    info.props.is_block = true;
+    info.props.is_pow2 = pow2;
+    info.props.is_tiled = true;
+    info.pixel_format = format;
+    info.num_bits = bits;
+    info.num_samples = 1;
+    info.size = {width, height, 1};
+    info.pitch = pitch;
+    info.tile_mode = Micro;
+    info.array_mode = AmdGpu::GetArrayMode(Micro);
+    info.UpdateSize();
+    return info;
+}
+
+ImageInfo ScapesBc6h() {
+    return BlockTexture(ScapesPhoto, 6024, 4016, 8192, 5, 128, vk::Format::eBc6HUfloatBlock, true);
+}
+
+ImageInfo BlockTarget(VAddr address, u32 width, u32 height, u32 pitch,
+                      vk::Format format = vk::Format::eR32G32B32A32Uint, u32 bits = 128,
+                      AmdGpu::TileMode tile_mode = Micro) {
+    auto info = Color2D(address, width, height, 1, tile_mode, format, bits);
+    info.pitch = pitch;
+    info.UpdateSize();
+    return info;
+}
+} // namespace
+
+TEST(ImageMips, ScapesBc6hLayoutMatchesTheGame) {
+    const auto texture = ScapesBc6h();
+    EXPECT_EQ(texture.guest_size, 0x2aa0000u);
+    EXPECT_EQ(texture.mips_layout[1].offset, 0x2000000u);
+}
+
+TEST(ImageMips, EncoderTargetsAreTheBlockTextureLevels) {
+    const auto texture = ScapesBc6h();
+    EXPECT_EQ(texture.BlockLevelOf(BlockTarget(ScapesPhoto, 2048, 1024, 2048)), 0);
+    EXPECT_EQ(texture.BlockLevelOf(BlockTarget(ScapesPhoto + 0x2000000, 1024, 512, 1024)), 1);
+    // Only the level's blocks (1506x1004), with the level's pitch: the same surface.
+    EXPECT_EQ(texture.BlockLevelOf(BlockTarget(ScapesPhoto, 1506, 1004, 2048)), 0);
+    // BC1 (64-bit blocks) through a 64-bit target.
+    const auto bc1 = BlockTexture(0x1000000000, 256, 256, 256, 1, 64, vk::Format::eBc1RgbaUnormBlock,
+                                  false);
+    EXPECT_EQ(bc1.BlockLevelOf(BlockTarget(0x1000000000, 64, 64, 64, vk::Format::eR32G32Uint, 64)),
+              0);
+}
+
+TEST(ImageMips, OtherTargetsOverABlockTextureAreNotItsLevels) {
+    const auto texture = ScapesBc6h();
+    // Not at a level's address.
+    EXPECT_EQ(texture.BlockLevelOf(BlockTarget(ScapesPhoto + 0x1000000, 2048, 1024, 2048)), -1);
+    // Another row pitch, fewer blocks than the level, another element size, another tiling.
+    EXPECT_EQ(texture.BlockLevelOf(BlockTarget(ScapesPhoto, 1506, 1004, 1506)), -1);
+    EXPECT_EQ(texture.BlockLevelOf(BlockTarget(ScapesPhoto, 1024, 1024, 2048)), -1);
+    EXPECT_EQ(texture.BlockLevelOf(
+                  BlockTarget(ScapesPhoto, 2048, 1024, 2048, vk::Format::eR32G32Uint, 64)),
+              -1);
+    EXPECT_EQ(texture.BlockLevelOf(BlockTarget(ScapesPhoto, 2048, 1024, 2048,
+                                               vk::Format::eR32G32B32A32Uint, 128, Macro)),
+              -1);
+    // An uncompressed texture has no block levels.
+    const auto plain = Color2D(ScapesPhoto, 2048, 1024, 1, Micro, vk::Format::eR32G32B32A32Uint,
+                               128);
+    EXPECT_EQ(plain.BlockLevelOf(BlockTarget(ScapesPhoto, 2048, 1024, 2048)), -1);
+}

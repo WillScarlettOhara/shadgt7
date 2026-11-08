@@ -266,6 +266,46 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
     return mip;
 }
 
+s32 ImageInfo::BlockLevelOf(const ImageInfo& target) const {
+    if (!props.is_block || target.props.is_block || props.is_depth || target.props.is_depth ||
+        target.num_bits != num_bits || num_samples != 1 || target.num_samples != 1 ||
+        target.resources.levels != 1 || target.resources.layers != 1 || resources.layers != 1 ||
+        size.depth != 1 || target.size.depth != 1 || type != AmdGpu::ImageType::Color2D ||
+        target.type != AmdGpu::ImageType::Color2D || target.bank_swizzle != bank_swizzle ||
+        target.alt_tile != alt_tile) {
+        return -1;
+    }
+    const u32 levels = std::min<u32>(std::max<u32>(resources.levels, 1), MAX_MIPS);
+    for (u32 mip = 0; mip < levels; ++mip) {
+        const MipInfo& layout = mips_layout[mip];
+        if (target.guest_address != guest_address + layout.offset) {
+            continue;
+        }
+        if (target.array_mode != array_mode || target.tile_mode != tile_mode) {
+            // FIX-039: a level stored micro-tiled, written with the 1D mode of its micro tiling.
+            const bool micro_tiled_mip = (micro_tiled_mips >> mip) & 1;
+            const bool same_micro_tiling =
+                !AmdGpu::IsMacroTiled(target.array_mode) &&
+                AmdGpu::GetMicroTileThickness(target.array_mode) ==
+                    std::min(AmdGpu::GetMicroTileThickness(array_mode), 4u) &&
+                AmdGpu::GetMicroTileMode(target.tile_mode) == AmdGpu::GetMicroTileMode(tile_mode);
+            if (!micro_tiled_mip || !same_micro_tiling) {
+                return -1;
+            }
+        }
+        // ComputeImageSize keeps a block level's pitch in texels (its blocks times 4).
+        const u32 block_pitch = std::max<u32>(layout.pitch / 4, 1);
+        const u32 blocks_w = (std::max(size.width >> mip, 1u) + 3) / 4;
+        const u32 blocks_h = (std::max(size.height >> mip, 1u) + 3) / 4;
+        if (target.pitch != block_pitch || target.size.width < blocks_w ||
+            target.size.height < blocks_h) {
+            return -1;
+        }
+        return static_cast<s32>(mip);
+    }
+    return -1;
+}
+
 s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
     if (!IsCompatible(info)) {
         return -1;

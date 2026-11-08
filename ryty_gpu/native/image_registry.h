@@ -60,6 +60,9 @@ struct SourcePlace {
     /// NAT-131: where in the target the picture comes from (a layer of a layered target).
     s32 src_mip = 0;
     s32 src_layer = 0;
+    /// FIX-GT7-126: the target holds one texel per block of this block-compressed texture; width
+    /// and height count blocks.
+    bool blocks = false;
 };
 
 class ImageEntry;

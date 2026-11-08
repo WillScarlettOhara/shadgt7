@@ -7759,11 +7759,17 @@ void NativeRenderer::RefreshSources(Native::ImageEntry& texture) {
     const vk::Image dst{Handle<VkImage_T>(texture.image->NativeHandle())};
     for (const auto& pick : picks) {
         const auto& place = pick.place;
+        // FIX-GT7-126: into a block-compressed texture from a target of one texel per block, the
+        // extent counts the source's texels (Vulkan's rule between compressed and uncompressed
+        // formats): the level's blocks.
+        const u32 block_dim = place.blocks ? 4u : 1u;
         const u32 width = std::min(
-            {place.width, std::max(texture.info.size.width >> place.mip, 1u),
+            {place.width,
+             (std::max(texture.info.size.width >> place.mip, 1u) + block_dim - 1) / block_dim,
              std::max(pick.source->info.size.width >> place.src_mip, 1u)});
         const u32 height = std::min(
-            {place.height, std::max(texture.info.size.height >> place.mip, 1u),
+            {place.height,
+             (std::max(texture.info.size.height >> place.mip, 1u) + block_dim - 1) / block_dim,
              std::max(pick.source->info.size.height >> place.src_mip, 1u)});
         // NAT-125: a layered target (a cube's faces drawn in one pass, the layer from the
         // vertex shader) gives all its layers; NAT-131: from the layer the texture starts at.
@@ -7798,7 +7804,9 @@ void NativeRenderer::RefreshSources(Native::ImageEntry& texture) {
         }
         const u32 src_mips = std::max<u32>(pick.source->image->Desc().mips, 1u);
         const u32 dst_mips = std::max<u32>(texture.image->Desc().mips, 1u);
-        for (u32 m = 1; whole && u32(place.src_mip) + m < src_mips && u32(place.mip) + m < dst_mips;
+        // Not for FIX-GT7-126's blocks: each level has its own target.
+        for (u32 m = 1; whole && !place.blocks && u32(place.src_mip) + m < src_mips &&
+                        u32(place.mip) + m < dst_mips;
              ++m) {
             vk::ImageCopy mip = region;
             mip.srcSubresource.mipLevel = u32(place.src_mip) + m;
