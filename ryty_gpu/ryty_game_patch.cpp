@@ -2657,6 +2657,140 @@ void Install(u8* base) {
 
 } // namespace Gt7Presets
 
+// FIX-GT7-162: launching a replay crashed once (a read of address 0 on a Job thread at GT7.exe
+// +0x1eaac3b). Each frame of an event, GT7's work module org_race (the std::function of
+// GTFramework::Organizer::Impl::initialize's lambda $_7, GT7.exe+0x1eaa5d0) sets the race sound
+// (bgm_effect, sfx_attenuation) from the Organizer's GTRace::RaceContext and reads the first
+// 32-bit field of the object the context's shared_ptr at +0x58 points to, without a check. The
+// race sequence (GTRaceApp::Sequence::Impl, module race_app) empties that shared_ptr during an
+// event (GT7.exe+0x1f251e0) and it is filled again shortly after. Both modules have the same order
+// key in the frame's first phase, and the game's executor only waits for its jobs between
+// different keys, so the two run as concurrent jobs of one frame: nothing in the game's code
+// orders the read and the emptying. The callback's two loads of the shared_ptr (control block,
+// then pointer) go to a stub that tests the pointer first: null, the function leaves through its
+// own end before any reference is taken, so that frame skips its race sound settings; set, the
+// game's code goes on as before (with or without a control block). This also covers an emptying
+// that lands between the two loads; one that lands after both and before the reference is taken
+// is still the game's own, narrower, window. Applied only where every byte checked below is GT7's
+// (no other game or version is changed). RYGT_RACE_CONTEXT_GUARD=0 turns it off.
+namespace Gt7RaceContextGuard {
+
+// mov rbx,[r13+0x60] (control block); mov r15,[r13+0x58] (pointer); test rbx,rbx; jz kNoRef.
+// The two loads (8 bytes) become a jmp to the stub.
+constexpr u64 kLoad = 0x1eaa889;
+constexpr u8 kLoadBytes[] = {0x49, 0x8b, 0x5d, 0x60, 0x4d, 0x8b, 0x7d, 0x58, 0x48,
+                             0x85, 0xdb, 0x0f, 0x84, 0xa1, 0x03, 0x00, 0x00};
+constexpr size_t kLoadsSize = 8;
+// With a control block: a reference taken (lea r14,[rbx+8]; ... call), the read, the release.
+constexpr u64 kRefPath = 0x1eaa89a;
+constexpr u8 kRefPathBytes[] = {0x4c, 0x8d, 0x73, 0x08, 0x4c, 0x89, 0xf7, 0xbe, 0x01, 0x00, 0x00,
+                                0x00, 0x31, 0xd2, 0xe8, 0x33, 0xab, 0xeb, 0x01, 0x45, 0x8b, 0x3f};
+// Without one: mov r15d,[r15] (the read that faulted); jmp kResume.
+constexpr u64 kNoRef = 0x1eaac3b;
+constexpr u8 kNoRefBytes[] = {0x45, 0x8b, 0x3f, 0xe9, 0x88, 0xfc, 0xff, 0xff};
+// cmp r15d,10: where both paths go on.
+constexpr u64 kResume = 0x1eaa8cb;
+constexpr u8 kResumeBytes[] = {0x41, 0x83, 0xff, 0x0a};
+// The function's end, also reached from other paths: rbx reloaded with the stack guard's address,
+// guard check against [rbp-0x30], add rsp,0x18, pops of rbx, r12-r15 and rbp, ret.
+constexpr u64 kEnd = 0x1eaaae8;
+constexpr u8 kEndBytes[] = {0x48, 0x8b, 0x1d, 0xf1, 0x41, 0x6d, 0x03, 0x48, 0x8b, 0x03, 0x48,
+                            0x3b, 0x45, 0xd0, 0x75, 0x5b, 0x48, 0x83, 0xc4, 0x18, 0x5b, 0x41,
+                            0x5c, 0x41, 0x5d, 0x41, 0x5e, 0x41, 0x5f, 0x5d, 0xc3};
+
+std::atomic<u64> g_skipped{0};
+
+// Called from the stub on the game's Job thread when the pointer is null.
+void PS4_SYSV_ABI Skipped(const void* control_block) {
+    const u64 count = g_skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 8 || (count & (count - 1)) == 0) {
+        std::fprintf(stderr,
+                     "[patch] FIX-GT7-162: race context empty (%s), this frame's race sound "
+                     "settings skipped (%llu so far)\n",
+                     control_block ? "pointer cleared, control block still read" : "emptied",
+                     static_cast<unsigned long long>(count));
+    }
+}
+
+bool Matches(u8* base, u64 rva, const u8* bytes, size_t size) {
+    return ReadableRange(base + rva, size) && std::memcmp(base + rva, bytes, size) == 0;
+}
+
+void Install(u8* base) {
+    const char* env = std::getenv("RYGT_RACE_CONTEXT_GUARD");
+    if (env && env[0] == '0') {
+        return;
+    }
+    if (!Matches(base, kLoad, kLoadBytes, sizeof(kLoadBytes)) ||
+        !Matches(base, kRefPath, kRefPathBytes, sizeof(kRefPathBytes)) ||
+        !Matches(base, kNoRef, kNoRefBytes, sizeof(kNoRefBytes)) ||
+        !Matches(base, kResume, kResumeBytes, sizeof(kResumeBytes)) ||
+        !Matches(base, kEnd, kEndBytes, sizeof(kEndBytes))) {
+        // GT Sport, or another GT7 build: silent unless the switch was set.
+        if (env && env[0]) {
+            std::fprintf(stderr, "[patch] FIX-GT7-162: original bytes differ, not applied\n");
+        }
+        return;
+    }
+    u8* const stub = AllocNear(base);
+    if (!stub) {
+        std::fprintf(stderr, "[patch] FIX-GT7-162: no memory near the game's code, not applied\n");
+        return;
+    }
+    std::vector<u8> code;
+    const auto bytes = [&](std::initializer_list<u8> list) { code.insert(code.end(), list); };
+    const auto imm64 = [&](u64 value) {
+        for (int i = 0; i < 8; ++i) code.push_back(static_cast<u8>(value >> (8 * i)));
+    };
+    const auto jump = [&](u64 rva) { // jmp [rip] -> the game's code
+        bytes({0xff, 0x25, 0, 0, 0, 0});
+        imm64(reinterpret_cast<u64>(base + rva));
+    };
+    code.insert(code.end(), kLoadBytes, kLoadBytes + kLoadsSize); // the game's two loads
+    bytes({0x4d, 0x85, 0xff});       // test r15, r15
+    bytes({0x74, 0x00});             // jz empty (set below)
+    const size_t jz_empty = code.size() - 1;
+    bytes({0x48, 0x85, 0xdb});       // test rbx, rbx
+    bytes({0x74, 0x0e});             // jz no_ref (over the next jump: 6 + 8 bytes)
+    jump(kRefPath);                  // a control block: reference, read, release, as the game does
+    bytes({0x45, 0x8b, 0x3f});       // no_ref: mov r15d, [r15]   (the game's kNoRef read)
+    jump(kResume);
+    const size_t empty = code.size();
+    // The function's end reloads rbx and pops every callee-saved register from its frame, so the
+    // stub may use rbx to keep rsp across a 16-byte aligned call of Skipped(control block).
+    bytes({0x48, 0x89, 0xdf});       // mov rdi, rbx
+    bytes({0x48, 0x89, 0xe3});       // mov rbx, rsp
+    bytes({0x48, 0x83, 0xe4, 0xf0}); // and rsp, -16
+    bytes({0x48, 0xb8});             // mov rax, Skipped
+    imm64(reinterpret_cast<u64>(&Skipped));
+    bytes({0xff, 0xd0});             // call rax
+    bytes({0x48, 0x89, 0xdc});       // mov rsp, rbx
+    jump(kEnd);
+    code[jz_empty] = static_cast<u8>(empty - (jz_empty + 1));
+    std::memcpy(stub, code.data(), code.size());
+
+    const auto distance =
+        reinterpret_cast<intptr_t>(stub) - reinterpret_cast<intptr_t>(base + kLoad + 5);
+    DWORD previous = 0;
+    if (distance < INT32_MIN || distance > INT32_MAX ||
+        !VirtualProtect(stub, 0x1000, PAGE_EXECUTE_READ, &previous)) {
+        std::fprintf(stderr, "[patch] FIX-GT7-162: stub out of reach or not executable, not applied\n");
+        VirtualFree(stub, 0, MEM_RELEASE);
+        return;
+    }
+    FlushInstructionCache(GetCurrentProcess(), stub, code.size());
+    // jmp stub; int3 x3 (nothing jumps inside the two loads).
+    const std::vector<u8> original(kLoadBytes, kLoadBytes + kLoadsSize);
+    std::vector<u8> replacement{0xe9, 0, 0, 0, 0, 0xcc, 0xcc, 0xcc};
+    const s32 relative = static_cast<s32>(distance);
+    std::memcpy(replacement.data() + 1, &relative, sizeof(relative));
+    if (!Apply(base, Patch{kLoad, original, replacement, "FIX-GT7-162 race context guard"})) {
+        VirtualFree(stub, 0, MEM_RELEASE);
+    }
+}
+
+} // namespace Gt7RaceContextGuard
+
 void RytyApplyGamePatches() {
     Gt7HdrStatus::Install(reinterpret_cast<u8*>(GetModuleHandleA(nullptr)));
     Gt7Presets::Install(reinterpret_cast<u8*>(GetModuleHandleA(nullptr))); // NEO-GT7-014
@@ -2675,6 +2809,7 @@ void RytyApplyGamePatches() {
     InstallScriptPatches(reinterpret_cast<u8*>(GetModuleHandleA(nullptr)));
     InstallGt7ScriptDump(reinterpret_cast<u8*>(GetModuleHandleA(nullptr))); // DIAG-GT7-043
     Gt7Cipher::Install(reinterpret_cast<u8*>(GetModuleHandleA(nullptr)));     // PERF-GT7-113
+    Gt7RaceContextGuard::Install(reinterpret_cast<u8*>(GetModuleHandleA(nullptr))); // FIX-GT7-162
     InstallTextEntryDiag(reinterpret_cast<u8*>(GetModuleHandleA(nullptr)));
     InstallFatalErrorDiag(reinterpret_cast<u8*>(GetModuleHandleA(nullptr)));
     if (!(std::getenv("RYGT_DECALS") && std::getenv("RYGT_DECALS")[0] == '0')) {

@@ -303,6 +303,7 @@ RYGT_SWITCH_EXPORT const char* const RyGT_SwitchDescriptions[] = {
     "RYGTSW1|RYGT_P2P_PORT|int|Runtime|3658|1..65535|UDP port used for peer-to-peer online play.",
     "RYGTSW1|RYGT_PAINTS|flag|Runtime|off|1 (first char) = on|GT Sport patch (GTS-004) at GT Sport code offsets; applied only if GT Sport's exact code is found, so not expected to work in GT7.",
     "RYGTSW1|RYGT_PATCH|string|Runtime|unset (no patches)|<hex rva>:<hex original bytes>:<hex new bytes>[,...]; each applied only where the original bytes match; under 4096 chars|Applies byte patches to the game exe, each only where its original bytes are found. For testing patches.",
+    "RYGTSW1|RYGT_RACE_CONTEXT_GUARD|flag|Runtime|on|0 (first char) = off; GT7 only, applied when the code bytes match|GT7: skips one frame's race sound settings when the race context is empty, instead of crashing (FIX-GT7-162). Leave on.",
     "RYGTSW1|RYGT_SCRIPTS|flag|Runtime|on|0 = off|Loads replacement scripts from patches\\scripts\\*.ADC through a GT Sport script-read hook, applied only if GT Sport's code is found.",
     "RYGTSW1|RYGT_WATERMARK|flag|Runtime|on (non-release builds)|0 = off; never shown in tagged releases|Shows the game and renderer revision watermark on screen. 0 hides it.",
     "RYGTSW1|SHADGT_BUILD_ON_SLOW_CORES|flag|Runtime|on|0 = off; only on hybrid (P-core/E-core) CPUs|On hybrid CPUs, shader and pipeline build threads run on the efficiency cores. 0 lets them use any core.",
