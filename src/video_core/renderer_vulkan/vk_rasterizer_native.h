@@ -505,6 +505,9 @@ private:
     std::mutex polled_mutex;
     std::vector<std::pair<VAddr, u64>> polled_textures;
     Region* RegionOver(VAddr address, u64 size);
+    /// FIX-GT7-184: no committed page, no region and no picture of the GPU's in the texture's
+    /// guest range.
+    bool NothingToRead(const VideoCore::ImageInfo& info);
     Region* MakeRegion(VAddr address, u64 size, bool write);
     void RefreshRegion(Region& region);
     /// FIX-194: the GPU wrote [address, address + size) (in GPU order, just recorded): where a
@@ -1566,8 +1569,9 @@ private:
             draw_ns = 0, dispatch_ns = 0, gathers = 0, gathered_bytes = 0, writebacks = 0,
             region_binds = 0, regions_made = 0, region_refreshes = 0;
         /// Images bound empty: no address or format, not mapped for the GPU, format the
-        /// device lacks, bad geometry, outside guest memory, FIX-081, no image made.
-        std::array<u64, 7> null_reasons{};
+        /// device lacks, bad geometry, outside guest memory, FIX-081, no image made, nothing
+        /// to read (FIX-GT7-184).
+        std::array<u64, 8> null_reasons{};
         /// NAT-110: time in the draw's phases: pipeline, targets, buffers, textures, sources,
         /// vertices, prepare (inits and uploads), record.
         std::array<u64, 8> phase_ns{};

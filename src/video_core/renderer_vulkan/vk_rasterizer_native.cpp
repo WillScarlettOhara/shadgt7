@@ -54,6 +54,7 @@
 #include "video_core/renderdoc.h"
 #include "core/guest_hash.h"
 #include "core/memory.h"
+#include "ryty_gpu/native/committed_pages.h"
 #include "ryty_gpu/native/image_registry.h"
 #include "video_core/renderer_vulkan/kept_shadow_map.h"
 #include "ryty_gpu/native/job_walker.h"
@@ -2342,6 +2343,22 @@ vk::DescriptorPool NativeRenderer::TakeDescriptorPool() {
     });
     ASSERT_MSG(result == vk::Result::eSuccess, "NAT-100: no descriptor pool");
     return pool;
+}
+
+// FIX-GT7-184: whether nothing can be read for a texture of this layout that has no image yet:
+// no page of its guest range is committed (its copy would be zeros), the GPU wrote no region there
+// (NAT-107 uploads from those) and drew no picture there (NAT-104 copies those in: the shadow maps
+// at 0x2900000000 are textures over memory the CPU never maps, so never committed).
+bool NativeRenderer::NothingToRead(const VideoCore::ImageInfo& info) {
+    const VAddr begin = info.guest_address;
+    const u64 size = info.guest_size;
+    if (Native::AnyCommittedPage(begin, size) || RegionOver(begin, size)) {
+        return false;
+    }
+    bool drawn = false;
+    registry->ForEachOverlapping(begin, begin + size,
+                                 [&](Native::ImageEntry& other) { drawn |= !other.from_cpu; });
+    return !drawn;
 }
 
 NativeRenderer::Region* NativeRenderer::RegionOver(VAddr address, u64 size) {
@@ -7227,7 +7244,54 @@ void NativeRenderer::BindTextures(const Shader::Info& stage, const AmdGpu::Regs&
             bind_null(5);
             continue;
         }
-        Native::ImageEntry* entry = registry->Find(desc.info, storage, frame);
+        // FIX-GT7-184: a texture that would be made now over memory with no committed page, no
+        // region the GPU wrote and no picture the GPU drew is bound empty, as FIX-GT7-068 does
+        // for buffers. Nothing can be read for it: its upload copied zeros for its whole size
+        // (NAT-042). IsMappedStart only tells that the start is in the guest arena, and the
+        // geometry check allows up to 4 GiB. GT7's pixel shader 0x2a265dff (a 720x540
+        // depth-to-distance pass) declares two textures it reads in a branch that is off in
+        // races; the game leaves their slots as they were, and they hold whatever was there,
+        // floats among them: a T# at 0x3f80000000 (1.0f) of 1x129 with 6 mips and 0x2ac00000
+        // bytes, or of 1x385 with 5 or 6 mips and 0xaa000000 or 0xaa800000 bytes, with or
+        // without the PS4 Pro mode. Each time the renderer made one of those and uploaded its
+        // 0.7 or 2.7 GiB of zeros, the GPU device was lost right after (RyGT-Team/rygt7 issue
+        // 54, on an RTX 3070 Ti; VK_EXT_device_fault: a write to an invalid address). Which
+        // write faults is not known. Smaller ones pass at a price: a 1.3 GiB one was followed
+        // by a 757 ms frame on an RTX 4070. An empty slot is not a zero-filled texture in every
+        // respect (alpha 0 where a format without alpha gave 1, no swizzle, sizes of 0, the
+        // depth stand-in for a depth compare): that only shows to a shader that reads it. From
+        // 4 MB, as FIX-GT7-068: below, the zero-filled texture costs little and stays. The test
+        // runs at each bind, so a texture whose memory is mapped later, or whose range a target
+        // is drawn into later, is made then. RYGT_NATIVE_UNREADABLE_TEXTURES=0: as before.
+        static const bool unreadable_textures = [] {
+            const char* env = std::getenv("RYGT_NATIVE_UNREADABLE_TEXTURES");
+            return !(env && env[0] == '0');
+        }();
+        Native::ImageEntry* entry = nullptr;
+        if (unreadable_textures && !storage && desc.info.guest_size >= 4_MB) {
+            entry = registry->Find(desc.info, false, frame, false);
+            if (!entry && NothingToRead(desc.info)) {
+                static std::atomic<u32> logged{};
+                if (Sample(logged)) {
+                    LOG_WARNING(Render_Vulkan,
+                                "FIX-GT7-184: texture {:#x}+{:#x} ({}x{}, pitch {}, {} mips, {} "
+                                "layers, tile {}, {}) of shader {:#x} has no mapped page and "
+                                "nothing the GPU wrote; bound empty; T# {:016x} {:016x} {:016x} "
+                                "{:016x}",
+                                desc.info.guest_address, desc.info.guest_size,
+                                desc.info.size.width, desc.info.size.height, desc.info.pitch,
+                                desc.info.resources.levels, desc.info.resources.layers,
+                                u32(desc.info.tile_mode), vk::to_string(desc.info.pixel_format),
+                                stage.pgm_hash, raw_sharp[0], raw_sharp[1], raw_sharp[2],
+                                raw_sharp[3]);
+                }
+                bind_null(7);
+                continue;
+            }
+        }
+        if (!entry) {
+            entry = registry->Find(desc.info, storage, frame);
+        }
         if (!entry) {
             bind_null(6);
             continue;
@@ -14749,7 +14813,8 @@ void NativeRenderer::Report() {
              "on the GPU ({:.1f} MB), uploads from guest memory on the GPU/CPU {}/{}; images so far: "
              "{} lookups, {} textures and {} targets made, {} uploads ({:.1f} MB); {:.0f} draws/s, "
              "{:.2f} us a draw, {:.2f} us a dispatch on the recorder; images bound empty by "
-             "reason (none/unmapped/format/geometry/outside/FIX-081/no image) {}; us per draw in "
+             "reason (none/unmapped/format/geometry/outside/FIX-081/no image/nothing to read) {}; "
+             "us per draw in "
              "pipeline/targets/buffers/textures(sources)/vertices/prepare/record {}",
              stats.draws, stats.dispatches, stats.skipped, stats.no_pipeline,
              stats.indirect_draws, stats.indirect_skipped, stats.passes,

@@ -173,6 +173,7 @@ RYGT_SWITCH_EXPORT const char* const RyGT_SwitchDescriptions[] = {
     "RYGTSW1|RYGT_NATIVE_MIRROR_STORAGE|int|Memory & VRAM|64|MB; 0 = none|Read-only storage buffers up to this size (MB) are kept in reusable video-memory mirrors.",
     "RYGTSW1|RYGT_NATIVE_READABLE_CUT|flag|Memory & VRAM|on|0 = off|Cuts buffer bindings down to their readable part of guest memory. 0 binds the full size.",
     "RYGTSW1|RYGT_NATIVE_SNAPSHOT_BELOW|int|Memory & VRAM|0 (off)|bytes (decimal, hex 0x or octal accepted)|Diagnosis: read-only shader buffers up to this size are copied when the draw is recorded instead of read in place (FIX-170).",
+    "RYGTSW1|RYGT_NATIVE_UNREADABLE_TEXTURES|flag|Memory & VRAM|on|0 = off|Binds empty a new texture of 4 MB or more with no mapped page and nothing the GPU wrote, instead of uploading zeros (FIX-GT7-184).",
     "RYGTSW1|RYGT_NATIVE_WRITE_REGIONS|flag|Memory & VRAM|on|0 = off|Shader-written ranges live in video memory regions instead of guest memory over PCIe (NAT-144). 0 is much slower.",
     "RYGTSW1|RYGT_POLL_FRAME_TEXTURES|flag|Memory & VRAM|on|0 = off|Small textures (<=256 KB) in GT7 per-frame memory are checked each frame instead of write-watched. 0 = watched.",
     "RYGTSW1|RYGT_REGION_COPY|flag|Memory & VRAM|on|0 = off|Fills new regions over small unimported mappings by copy instead of import (PERF-GT7-131). 0 turns it off.",
